@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { brotliCompressSync, deflateSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
-import { writeCredential } from '../src/core/auth-store.js'
+import { readCredential, writeCredential } from '../src/core/auth-store.js'
 import { CatbusError } from '../src/core/errors.js'
 import { fakeResponse, mockSender, type PreparedRequest } from '../src/core/http.js'
 import type { Logger } from '../src/core/log.js'
@@ -285,6 +285,9 @@ const threadPage = (pn: number, count = 21) => ({
   page: { num: pn, size: 10, count },
   replies: Array.from({ length: Math.max(0, Math.min(10, count - (pn - 1) * 10)) }, (_, i) => threadReply(71001 + (pn - 1) * 10 + i)),
 })
+const DRAW_ID = '100000000000000001'
+const DRAW_OID = '200000000000000002'
+const drawDetail = { item: { type: 'DYNAMIC_TYPE_DRAW', basic: { comment_type: 11, comment_id_str: DRAW_OID } } }
 
 describe('bilibili comment replies：非上游楼中楼', () => {
   it('使用 aid、根评论和固定页大小，带视频 Referer 与会话 Cookie；保留直接父 ID 和 raw', async () => {
@@ -338,11 +341,64 @@ describe('bilibili comment replies：非上游楼中楼', () => {
     expect(result.page).toEqual({ cursor: '3', has_more: true })
   })
 
-  it('拒绝尚未验证的动态评论区', async () => {
-    const item = 'dyn:100000000000000001'
-    const { error, urls } = await runCommand('commentReplies', { args: { item, comment: THREAD_ROOT } }, () => ok({}))
-    expect(error).toMatchObject({ code: 'UNSUPPORTED', message: expect.stringContaining('尚不支持动态') })
-    expect(urls).toEqual([])
+  it.each(['DYNAMIC_TYPE_WORD', 'DYNAMIC_TYPE_FORWARD'])('拒绝尚未验证的 %s 楼中楼', async (type) => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item: `dyn:${DRAW_ID}`, comment: THREAD_ROOT } }, () => ok({ item: { type } }))
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', hint: expect.stringContaining('尚未验证') })
+    expect(urls).toHaveLength(1)
+    expect(urls[0]).toContain('/x/polymer/web-dynamic/v1/detail?')
+  })
+
+  it.each([`dyn:${DRAW_ID}`, DRAW_ID, `https://www.bilibili.com/opus/${DRAW_ID}`, `https://t.bilibili.com/${DRAW_ID}`])('图文动态 %s：详情中的相簿 ID 作为 oid，item_id 仍为动态 ID', async (item) => {
+    const raw = threadReply(71002, 71001)
+    const { result, requests, error } = await runCommand('commentReplies', { args: { item, comment: THREAD_ROOT } }, (url) =>
+      url.includes('/web-dynamic/v1/detail') ? ok(drawDetail) : ok({ page: { size: 10, count: 2 }, replies: [raw] }),
+    )
+    expect(error).toBeUndefined()
+    expect(requests).toHaveLength(2)
+    expect(requests[0]!.url).toBe(`https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${DRAW_ID}&features=itemOpusStyle`)
+    expect(requests[0]!.headers).toContainEqual(['referer', `https://www.bilibili.com/opus/${DRAW_ID}`])
+    expect(requests[1]!.url).toBe(`https://api.bilibili.com/x/v2/reply/reply?type=11&oid=${DRAW_OID}&root=70001&pn=1&ps=10`)
+    expect(requests[1]!.headers).toContainEqual(['referer', `https://www.bilibili.com/opus/${DRAW_ID}`])
+    expect(result.data[0]).toMatchObject({ item_id: DRAW_ID, parent_id: '71001' })
+    expect(result.data[0][RAW]).toEqual(raw)
+    expect(result.page).toEqual({ cursor: null, has_more: false })
+  })
+
+  it('图文动态 comment list 同样解析相簿评论区，根评论可供 comment replies 使用', async () => {
+    const { result, urls, error } = await runCommand('commentList', { args: { item: `https://www.bilibili.com/opus/${DRAW_ID}` } }, (url) =>
+      url.includes('/web-dynamic/v1/detail') ? ok(drawDetail) : ok({ replies: [threadReply(70001, 0)], cursor: { is_end: true } }),
+    )
+    expect(error).toBeUndefined()
+    expect(urls).toHaveLength(2)
+    expect(urls[1]).toContain(`/x/v2/reply/wbi/main?oid=${DRAW_OID}&type=11&`)
+    expect(result.data[0]).toMatchObject({ id: THREAD_ROOT, item_id: DRAW_ID, parent_id: null })
+  })
+
+  it.each(['DYNAMIC_TYPE_WORD', 'DYNAMIC_TYPE_FORWARD'])('%s 的主评论仍用 type=17 和动态 ID', async (type) => {
+    const { result, urls, error } = await runCommand('commentList', { args: { item: `dyn:${DRAW_ID}` } }, (url) =>
+      url.includes('/web-dynamic/v1/detail') ? ok({ item: { type } }) : ok({ replies: [threadReply(70001, 0)], cursor: { is_end: true } }),
+    )
+    expect(error).toBeUndefined()
+    expect(urls[1]).toContain(`/x/v2/reply/wbi/main?oid=${DRAW_ID}&type=17&`)
+    expect(result.data[0]).toMatchObject({ id: THREAD_ROOT, item_id: DRAW_ID })
+  })
+
+  it.each([{}, { item: { type: 'DYNAMIC_TYPE_DRAW' } }, { item: { type: 'DYNAMIC_TYPE_DRAW', basic: { comment_type: 11 } } }, { item: { type: 'DYNAMIC_TYPE_DRAW', basic: { comment_type: 17, comment_id_str: DRAW_ID } } }])('图文详情缺少相簿评论区信息时报错，不误用动态 ID', async (detail) => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item: `dyn:${DRAW_ID}`, comment: THREAD_ROOT } }, () => ok(detail))
+    expect(error).toMatchObject({ code: 'UPSTREAM' })
+    expect(urls).toHaveLength(1)
+  })
+
+  it.each(['commentList', 'commentReplies'] as const)('%s 不把未支持的动态类型误当作 type=17', async (name) => {
+    const { error, urls } = await runCommand(name, { args: { item: `dyn:${DRAW_ID}`, comment: THREAD_ROOT } }, () => ok({ item: { type: 'DYNAMIC_TYPE_AV' } }))
+    expect(error).toMatchObject({ code: 'UNSUPPORTED' })
+    expect(urls).toHaveLength(1)
+  })
+
+  it.each([[-101, 'AUTH_EXPIRED'], [10031, 'RISK_CONTROL'], [12002, 'UPSTREAM']])('动态图文详情的业务码 %i 不得降级为错误的 type=17 请求', async (code, expected) => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item: `dyn:${DRAW_ID}`, comment: THREAD_ROOT } }, () => ({ code, message: '测试错误' }))
+    expect(error).toMatchObject({ code: expected })
+    expect(urls).toHaveLength(1)
   })
 
   it.each(['bad', '0', '-1', '1.5'])('拒绝无效游标 %s', async (cursor) => {
@@ -371,20 +427,26 @@ describe('bilibili comment replies：非上游楼中楼', () => {
 })
 
 describe.each([
-  { kind: '视频', item: THREAD_ITEM, type: '1', referer: `https://www.bilibili.com/video/${THREAD_BVID}/` },
-  { kind: '专栏', item: 'cv100001', type: '12', referer: 'https://www.bilibili.com/read/cv100001' },
-])('bilibili comment replies：$kind CLI 分页与输出', ({ item, type, referer }) => {
+  { kind: '视频', item: THREAD_ITEM, type: '1', oid: '100001', referer: `https://www.bilibili.com/video/${THREAD_BVID}/` },
+  { kind: '专栏', item: 'cv100001', type: '12', oid: '100001', referer: 'https://www.bilibili.com/read/cv100001' },
+  { kind: '图文动态', item: `https://www.bilibili.com/opus/${DRAW_ID}`, type: '11', oid: DRAW_OID, referer: `https://www.bilibili.com/opus/${DRAW_ID}` },
+])('bilibili comment replies：$kind CLI 分页与输出', ({ item, type, oid, referer }) => {
   useTempHome()
 
-  async function withThread(run: (pages: number[]) => Promise<void>) {
+  async function withThread(run: (pages: number[], details: string[]) => Promise<void>) {
     await writeCredential(loggedCtx().credential)
     const pages: number[] = []
+    const details: string[] = []
     const restoreRand = deterministic({ now: NOW })
     const restore = mockSender((p) => {
       const u = new URL(p.url)
+      if (type === '11' && u.pathname === '/x/polymer/web-dynamic/v1/detail') {
+        details.push(p.url)
+        return fakeResponse(ok(drawDetail), { headers: [['content-type', 'application/json']], url: p.url })
+      }
       expect(u.pathname).toBe('/x/v2/reply/reply')
       expect(u.searchParams.get('type')).toBe(type)
-      expect(u.searchParams.get('oid')).toBe('100001')
+      expect(u.searchParams.get('oid')).toBe(oid)
       expect(u.searchParams.get('ps')).toBe('10')
       expect(p.headers).toContainEqual(['referer', referer])
       const pn = Number(u.searchParams.get('pn'))
@@ -392,7 +454,7 @@ describe.each([
       return fakeResponse(ok(threadPage(pn)), { headers: [['content-type', 'application/json']], url: p.url })
     })
     try {
-      await run(pages)
+      await run(pages, details)
     } finally {
       restore()
       restoreRand()
@@ -400,6 +462,20 @@ describe.each([
   }
 
   const read = (...options: string[]) => cli('bilibili', 'comment', 'replies', item, THREAD_ROOT, '-a', 'default', '-q', ...options)
+
+  if (type === '11') {
+    it('跨页只读取一次动态详情，新命令重新解析；不把解析结果写入凭证', async () => {
+      await withThread(async (pages, details) => {
+        const first = await read('--all')
+        expect(first.code).toBe(0)
+        expect(pages).toEqual([1, 2, 3])
+        expect(details).toHaveLength(1)
+        expect((await read()).code).toBe(0)
+        expect(details).toHaveLength(2)
+        expect((await readCredential('bilibili', 'web', 'default'))?.extra).toEqual({ wbi: { key: MIXIN, at: NOW } })
+      })
+    })
+  }
 
   it('默认一页；--cursor 续页；--limit 截断后续读不遗漏、不重复', async () => {
     await withThread(async (pages) => {
@@ -599,16 +675,17 @@ function liveRoute(extra: (url: string) => unknown = () => ok({})) {
 }
 
 describe('bilibili 命令：审查修复', () => {
-  it('comment list 动态：业务错误带上「动态只支持纯文字和转发」', async () => {
+  it('comment list 动态：业务错误说明相簿评论区的解析', async () => {
     const { error } = await runCommand('commentList', { args: { item: 'https://t.bilibili.com/987654321098765432' } }, () => ({ code: 12002, message: '评论区已关闭' }))
-    expect(error).toMatchObject({ code: 'UPSTREAM', hint: expect.stringContaining('动态只支持纯文字和转发') })
+    expect(error).toMatchObject({ code: 'UPSTREAM', hint: expect.stringContaining('通过动态详情获取相簿 ID') })
     // 稿件的评论区不带这条 hint
     const video = await runCommand('commentList', { args: { item: BVID } }, () => ({ code: 12002, message: '评论区已关闭' }))
     expect((video.error as CatbusError).hint).toBeNull()
   })
 
-  it('comment list / add / delete：注册表标 ◐，note 说明动态的限制', () => {
-    for (const key of ['comment list', 'comment add', 'comment delete']) {
+  it('comment list / add / delete：读图文动态使用非上游解析，写操作保留既有范围', () => {
+    expect(web().commands.get('comment list')).toMatchObject({ upstream: 'partial', note: expect.stringContaining('非上游动态详情') })
+    for (const key of ['comment add', 'comment delete']) {
       expect(web().commands.get(key)).toMatchObject({ upstream: 'partial', note: expect.stringContaining('动态只支持纯文字和转发') })
     }
   })
@@ -869,7 +946,7 @@ describe('bilibili 纯算', () => {
     expect(await t('https://www.bilibili.com/opus/987654321098765432')).toMatchObject({ type: 17 })
     expect(await t('987654321098765432')).toMatchObject({ type: 17 })
     expect(await t('2251799813685247')).toMatchObject({ type: 1, oid: '2251799813685247' })
-    await expect(t('什么')).rejects.toMatchObject({ code: 'USAGE', hint: expect.stringContaining('动态只支持纯文字和转发') })
+    await expect(t('什么')).rejects.toMatchObject({ code: 'USAGE', hint: expect.stringContaining('动态链接或动态 ID') })
   })
 
   it('动态与收藏夹参数：ID、链接都接受', async () => {
