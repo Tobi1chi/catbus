@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { brotliCompressSync, deflateSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
+import { writeCredential } from '../src/core/auth-store.js'
 import { CatbusError } from '../src/core/errors.js'
-import { fakeResponse, mockSender } from '../src/core/http.js'
+import { fakeResponse, mockSender, type PreparedRequest } from '../src/core/http.js'
 import type { Logger } from '../src/core/log.js'
 import * as pb from '../src/core/pb.js'
 import { deterministic } from '../src/core/rand.js'
@@ -20,6 +21,7 @@ import { resolveDynamic, resolveFolder, resolveReplyTarget, resolveRoom } from '
 import { av2bv, bv2av, encWbi, mixinKey, murmur3Hex } from '../src/platforms/bilibili/web/sign.js'
 import { uploadVideo } from '../src/platforms/bilibili/web/upos.js'
 import { expectRequests, type GoldenRequest, loadCase, makeCtx, replay } from './golden.js'
+import { cli, useTempHome } from './helpers.js'
 
 const COOKIES =
   'buvid3=FAKE-BUVID3-0000infoc; b_nut=1789990000; _uuid=FAKE-UUID-0000infoc; buvid4=FAKE-BUVID4-0000; ' +
@@ -238,8 +240,10 @@ async function runCommand(
 ) {
   const urls: string[] = []
   const bodies: unknown[] = []
+  const requests: PreparedRequest[] = []
   const restoreRand = deterministic({ now: NOW })
   const restore = mockSender((p) => {
+    requests.push(p)
     urls.push(p.url)
     bodies.push(p.body == null ? null : Buffer.from(p.body).toString('utf8'))
     return fakeResponse(route(p.url, p.body) as object, { headers: [['content-type', 'application/json']], url: p.url })
@@ -254,7 +258,7 @@ async function runCommand(
     } catch (err) {
       error = err
     }
-    return { result, error, urls, bodies }
+    return { result, error, urls, bodies, requests }
   } finally {
     restore()
     restoreRand()
@@ -262,6 +266,163 @@ async function runCommand(
 }
 
 const ok = (data: unknown) => ({ code: 0, message: '0', data })
+
+// 非上游楼中楼接口：只用虚构评论、用户和视频 aid。
+const THREAD_ITEM = 'av100001'
+const THREAD_BVID = av2bv('100001')
+const THREAD_ROOT = '70001'
+const threadReply = (rpid: number, parent = 70001) => ({
+  rpid,
+  root: 70001,
+  parent,
+  content: { message: `测试回复 ${rpid}` },
+  member: { mid: 10002, uname: '测试用户' },
+  ctime: 1700000000,
+  like: 3,
+  rcount: 0,
+})
+const threadPage = (pn: number, count = 21) => ({
+  page: { num: pn, size: 10, count },
+  replies: Array.from({ length: Math.max(0, Math.min(10, count - (pn - 1) * 10)) }, (_, i) => threadReply(71001 + (pn - 1) * 10 + i)),
+})
+
+describe('bilibili comment replies：非上游视频楼中楼', () => {
+  it('使用 aid、根评论和固定页大小，带视频 Referer 与会话 Cookie；保留直接父 ID 和 raw', async () => {
+    const raw = threadReply(71002, 71001)
+    const { result, requests, error } = await runCommand('commentReplies', { args: { item: `https://www.bilibili.com/video/${THREAD_BVID}/`, comment: THREAD_ROOT } }, () =>
+      ok({ page: { num: 1, size: 10, count: 21 }, replies: [raw] }),
+    )
+    expect(error).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ method: 'GET', url: 'https://api.bilibili.com/x/v2/reply/reply?type=1&oid=100001&root=70001&pn=1&ps=10', body: null })
+    expect(requests[0]!.headers).toContainEqual(['referer', `https://www.bilibili.com/video/${THREAD_BVID}/`])
+    expect(requests[0]!.cookies).toContainEqual(['SESSDATA', 'fake-sessdata'])
+    expect(result.data[0]).toEqual({
+      id: '71002', item_id: THREAD_BVID, parent_id: '71001',
+      author: { id: '10002', name: '测试用户', url: 'https://space.bilibili.com/10002' },
+      text: '测试回复 71002', created_at: '2023-11-15T06:13:20+08:00', stats: { likes: 3, replies: 0 },
+    })
+    expect(result.data[0][RAW]).toEqual(raw)
+    expect(result.page).toEqual({ cursor: '2', has_more: true })
+  })
+
+  it.each([1, 2, 3])('第 %i 页：按 count 判断下一页，末页不再返回游标', async (pn) => {
+    const { result, urls } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: THREAD_ROOT }, cursor: pn === 1 ? null : String(pn) }, () => ok(threadPage(pn)))
+    expect(urls[0]).toContain(`&pn=${pn}&ps=10`)
+    expect(result.data).toHaveLength(pn === 3 ? 1 : 10)
+    expect(result.data[0].id).toBe(String(71001 + (pn - 1) * 10))
+    expect(result.page).toEqual({ cursor: pn < 3 ? String(pn + 1) : null, has_more: pn < 3 })
+  })
+
+  it.each([0, 10, 20])('回复数 %i：空楼或整页末尾立即结束', async (count) => {
+    const pn = Math.max(1, count / 10)
+    const { result } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: THREAD_ROOT }, cursor: String(pn) }, () => ok(threadPage(pn, count)))
+    expect(result.page).toEqual({ cursor: null, has_more: false })
+  })
+
+  it('replies=null 时停止，即使 count 仍大于当前页', async () => {
+    const { result } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: THREAD_ROOT } }, () => ok({ page: { count: 21, size: 10 }, replies: null }))
+    expect(result).toEqual({ data: [], page: { cursor: null, has_more: false } })
+  })
+
+  it.each(['cv100001', 'dyn:100000000000000001'])('拒绝尚未支持的评论区 %s', async (item) => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item, comment: THREAD_ROOT } }, () => ok({}))
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', message: expect.stringContaining('只支持视频') })
+    expect(urls).toEqual([])
+  })
+
+  it.each(['bad', '0', '-1', '1.5'])('拒绝无效游标 %s', async (cursor) => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: THREAD_ROOT }, cursor }, () => ok({}))
+    expect(error).toMatchObject({ code: 'USAGE' })
+    expect(urls).toEqual([])
+  })
+
+  it('根评论必须是数字 ID', async () => {
+    const { error, urls } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: 'bad' } }, () => ok({}))
+    expect(error).toMatchObject({ code: 'USAGE' })
+    expect(urls).toEqual([])
+  })
+
+  it.each([
+    [-101, 'AUTH_EXPIRED', undefined],
+    [-352, 'RISK_CONTROL', 'blocked'],
+    [-509, 'RISK_CONTROL', 'rate_limit'],
+    [10031, 'RISK_CONTROL', 'captcha'],
+    [12002, 'UPSTREAM', undefined],
+  ])('业务码 %i 沿用会话层错误映射', async (code, expected, kind) => {
+    const { error } = await runCommand('commentReplies', { args: { item: THREAD_ITEM, comment: THREAD_ROOT } }, () => ({ code, message: '测试错误' }))
+    expect(error).toMatchObject({ code: expected })
+    if (expected !== 'AUTH_EXPIRED') expect(error).toMatchObject({ detail: { code, ...(kind ? { kind } : {}) } })
+  })
+})
+
+describe('bilibili comment replies：CLI 分页与输出', () => {
+  useTempHome()
+
+  async function withThread(run: (pages: number[]) => Promise<void>) {
+    await writeCredential(loggedCtx().credential)
+    const pages: number[] = []
+    const restoreRand = deterministic({ now: NOW })
+    const restore = mockSender((p) => {
+      const u = new URL(p.url)
+      expect(u.pathname).toBe('/x/v2/reply/reply')
+      expect(u.searchParams.get('ps')).toBe('10')
+      const pn = Number(u.searchParams.get('pn'))
+      pages.push(pn)
+      return fakeResponse(ok(threadPage(pn)), { headers: [['content-type', 'application/json']], url: p.url })
+    })
+    try {
+      await run(pages)
+    } finally {
+      restore()
+      restoreRand()
+    }
+  }
+
+  const read = (...options: string[]) => cli('bilibili', 'comment', 'replies', THREAD_ITEM, THREAD_ROOT, '-a', 'default', '-q', ...options)
+
+  it('默认一页；--cursor 续页；--limit 截断后续读不遗漏、不重复', async () => {
+    await withThread(async (pages) => {
+      const first = await read()
+      expect(first.code).toBe(0)
+      expect(first.env).toMatchObject({ ok: true, resource: 'comment', action: 'replies', account: 'default', page: { cursor: '2', has_more: true } })
+      expect(first.env.data).toHaveLength(10)
+      const second = await read('--cursor', first.env.page.cursor, '--limit', '5')
+      expect(second.code).toBe(0)
+      expect(second.env.page).toEqual({ cursor: '2#skip=5', has_more: true })
+      const rest = await read('--cursor', second.env.page.cursor, '--all')
+      expect(rest.code).toBe(0)
+      const ids = [...first.env.data, ...second.env.data, ...rest.env.data].map((v: any) => v.id)
+      expect(ids).toEqual(Array.from({ length: 21 }, (_, i) => String(71001 + i)))
+      expect(rest.env.page).toEqual({ cursor: null, has_more: false })
+      expect(pages).toEqual([1, 2, 2, 3])
+    })
+  })
+
+  it('--limit 跨页截断，首页截断也可续读', async () => {
+    await withThread(async () => {
+      const limited = await read('--limit', '12')
+      expect(limited.code).toBe(0)
+      expect(limited.env.data).toHaveLength(12)
+      expect(limited.env.page).toEqual({ cursor: '2#skip=2', has_more: true })
+      const first = await read('--limit', '1')
+      expect(first.env.page.cursor).toBe('#skip=1')
+      const rest = await read('--cursor', first.env.page.cursor, '--all')
+      expect(rest.env.data.map((v: any) => v.id)).toEqual(Array.from({ length: 20 }, (_, i) => String(71002 + i)))
+    })
+  })
+
+  it('--all -o jsonl --raw 输出所有原始回复，stderr 摘要保留分页信息', async () => {
+    await withThread(async (pages) => {
+      const result = await read('--all', '-o', 'jsonl', '--raw')
+      expect(result.code).toBe(0)
+      const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line))
+      expect(rows).toEqual([1, 2, 3].flatMap((pn) => threadPage(pn).replies))
+      expect(JSON.parse(result.stderr)).toMatchObject({ ok: true, data: null, page: { cursor: null, has_more: false }, error: null })
+      expect(pages).toEqual([1, 2, 3])
+    })
+  })
+})
 
 describe('bilibili 命令：本次补齐的能力', () => {
   it('item related：取 view/detail 的 Related，归一化成稿件', async () => {

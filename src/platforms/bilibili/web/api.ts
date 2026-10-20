@@ -145,6 +145,25 @@ export async function replies(b: Bili, oid: string | number, type = 1, offset = 
   return b.get(`${API}/x/v2/reply/wbi/main`, { headers: h.get(), query: await b.wbi(withLocation(params, '1315875')) })
 }
 
+/**
+ * 非上游：视频根评论的楼中楼（上游 get_replies 只读主评论）。
+ * 按 Issue #22 的只读验证补充 /x/v2/reply/reply；只支持 type=1，oid 为 aid。
+ * 固定每页 10 条，--limit 截断与续读由 core 处理，避免改变页大小导致漏读。
+ */
+export function replyReplies(b: Bili, bvid: string, aid: string, root: string, page = 1) {
+  const h = headers('GET').referer(`${MAIN}/video/${bvid}/`)
+  return b.get(`${API}/x/v2/reply/reply`, {
+    headers: h.get(),
+    query: [
+      ['type', 1],
+      ['oid', aid],
+      ['root', root],
+      ['pn', page],
+      ['ps', 10],
+    ],
+  })
+}
+
 export async function userInfo(b: Bili, mid: string) {
   const h = headers('GET', { origin: ORIGIN.space }).referer(`https://space.bilibili.com/${mid}`)
   const params = withLocation(

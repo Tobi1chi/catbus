@@ -409,6 +409,20 @@ export async function commentList(ctx: Ctx) {
   return paged(list, next && `${next}~${Number(seq) + 1}`, !d.cursor?.is_end && list.length > 0 && next != null)
 }
 
+/** 视频根评论下的可见楼中楼；游标封装接口页码，页内截断由 core 的 #skip 续读。 */
+export async function commentReplies(ctx: Ctx) {
+  const root = ctx.args.comment!
+  if (!/^\d+$/.test(root)) throw new CatbusError('USAGE', '根评论 ID 是数字', { hint: '传 comment list 输出的根评论 id' })
+  const pn = Number(ctx.cursor ?? 1)
+  if (!Number.isSafeInteger(pn) || pn < 1) throw new CatbusError('USAGE', '楼中楼分页游标无效', { hint: '原样传入上次返回的 page.cursor' })
+  const b = await bili(ctx)
+  const t = await resolveReplyTarget(b, ctx.args.item!)
+  if (t.type !== 1) throw new CatbusError('UNSUPPORTED', 'comment replies 只支持视频的楼中楼', { hint: '传 BV 号、av 号、aid 或视频链接；专栏、动态尚不支持' })
+  const d = await api.replyReplies(b, t.itemId, t.oid, root, pn)
+  const list = (d.replies ?? []).map((r: any) => norm.reply(r, t.itemId))
+  return paged(list, pn + 1, list.length > 0 && pn * Number(d.page?.size ?? 10) < Number(d.page?.count ?? 0))
+}
+
 /** 回复楼中楼：--root 给根评论、--reply-to 给被回复的那条；只给 --reply-to 时它就是根评论（上游 add_reply 的 root / parent）。 */
 export async function commentAdd(ctx: Ctx) {
   const b = await bili(ctx)
