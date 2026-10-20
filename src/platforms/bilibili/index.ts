@@ -90,8 +90,8 @@ export default definePlatform({
 
         'comment list': impl('partial', 'commentList', { note: DYNAMIC_REPLY_NOTE, args: [replyTarget], options: { sort: filter.sort('popular', 'latest') } }),
         'comment replies': impl('partial', 'commentReplies', {
-          note: '非上游：视频楼中楼接口 x/v2/reply/reply，没有对拍；只支持视频根评论下的可见回复，专栏、动态尚不支持',
-          args: [item, { name: 'comment', summary: '根评论 ID（comment list 输出的 id）' }],
+          note: '非上游：楼中楼接口 x/v2/reply/reply，没有对拍；支持视频、专栏根评论下的可见回复，动态尚不支持',
+          args: [{ name: 'item', summary: '视频（BV 号、av 号、视频链接）或专栏（cv 号、专栏链接）' }, { name: 'comment', summary: '根评论 ID（comment list 输出的 id）' }],
         }),
         'comment add': impl('partial', 'commentAdd', {
           note: DYNAMIC_REPLY_NOTE,

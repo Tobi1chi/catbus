@@ -8,7 +8,7 @@
 
 ## 能做
 
-- **读**：`item search` / `get` / `related` / `media` / `download` / `list` / `categories` / `subtitles`（字幕，带时间轴）；`user get` / `search` / `items`（`--keyword` 过滤）；`comment list`（稿件、专栏、动态）；`comment replies`（视频根评论下的可见楼中楼）；`feed list`（`--kind recommend|hot|following`，following 只列关注的人的视频投稿，需要登录）；`live get` / `search` / `categories` / `listen` / `history` / `gifts` / `media`；`folder list` / `items`；`danmaku list`；`draft get`。
+- **读**：`item search` / `get` / `related` / `media` / `download` / `list` / `categories` / `subtitles`（字幕，带时间轴）；`user get` / `search` / `items`（`--keyword` 过滤）；`comment list`（稿件、专栏、动态）；`comment replies`（视频、专栏根评论下的可见楼中楼）；`feed list`（`--kind recommend|hot|following`，following 只列关注的人的视频投稿，需要登录）；`live get` / `search` / `categories` / `listen` / `history` / `gifts` / `media`；`folder list` / `items`；`danmaku list`；`draft get`。
 - **写**：`item like` / `unlike` / `collect` / `uncollect`（`--folder`）/ `publish` / `delete`；`item coin`、`item triple`；`comment add` / `delete`；`danmaku send`；`dynamic publish` / `delete`；`article publish`（专栏）/ `draft delete`；`live send` / `start` / `stop`；`media upload`。
 
 B 站写操作是 10 个平台里验证最充分的：点赞、收藏、评论增删、发弹幕、专栏草稿都已真机通过。
@@ -20,7 +20,7 @@ B 站写操作是 10 个平台里验证最充分的：点赞、收藏、评论�
 ## 参数
 
 - 稿件：BV 号、av 号、纯数字 aid、视频链接，或 `b23.tv` 短链。
-- `comment list` / `add` / `delete` 的 `<item>` 还可以是专栏（`cv<id>`）或动态（动态链接、`dyn:<id>`）。`comment replies <item> <comment>` 只支持视频，`<comment>` 取 `comment list` 返回的根评论 ID。
+- `comment list` / `add` / `delete` 的 `<item>` 还可以是专栏（`cv<id>`）或动态（动态链接、`dyn:<id>`）。`comment replies <item> <comment>` 支持视频和专栏，`<comment>` 取 `comment list` 返回的根评论 ID。
 - 用户：mid（数字）、空间链接 `space.bilibili.com/<mid>` 或 `me`。
 - 直播间：房间号（短号自动换真实号）、直播间链接，或主播（空间链接、`me`）。
 - 收藏夹：`folder list` 输出的 id 或 url。
@@ -31,7 +31,7 @@ B 站写操作是 10 个平台里验证最充分的：点赞、收藏、评论�
 
 ## 坑
 
-- `comment replies` 是非上游接口，只读取指定根评论下可见的楼中楼，专栏、动态尚不支持。默认每页 10 条，用 `--limit` / `--all` 自动翻页，续读时原样传回 `page.cursor`。`parent_id` 是直接父评论 ID，可能指向另一条子回复；原始 `root` / `parent` 用 `--raw` 取。`comment list --raw` 的 `replies` 只是预览。
+- `comment replies` 是非上游接口，读取视频、专栏指定根评论下可见的楼中楼；动态尚未验证，不支持。默认每页 10 条，用 `--limit` / `--all` 自动翻页，续读时原样传回 `page.cursor`。`parent_id` 是直接父评论 ID，可能指向另一条子回复；原始 `root` / `parent` 用 `--raw` 取。`comment list --raw` 的 `replies` 只是预览。
 - **`danmaku list` 不完整**：6 分钟以内的视频只返回前 2 分钟的弹幕且不报错，更长的报 `UPSTREAM`。不要用它做完整统计，要告诉用户。
 - `item delete` 需要极验点选，catbus 过不了，会报 `RISK_CONTROL`：让用户在网页端撤稿。
 - `item coin` 会真的花掉硬币、`item triple` 包含投币，都是危险操作，要用户同意后才加 `-y`。
@@ -48,6 +48,7 @@ catbus bilibili item get BV1xx411c7mD
 catbus bilibili item subtitles BV1xx411c7mD
 catbus bilibili comment list BV1xx411c7mD --limit 200 -o jsonl
 catbus bilibili comment replies BV1xx411c7mD <根评论ID> --all -o jsonl
+catbus bilibili comment replies cv<专栏ID> <根评论ID> --all -o jsonl
 catbus bilibili user items https://space.bilibili.com/<mid> --keyword 教程
 catbus bilibili live listen <房间号> --duration 10m
 ```

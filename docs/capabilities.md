@@ -149,7 +149,7 @@
 - kuaishou `comment list`：--product 规划中
 - weibo `comment list`：只有一级评论
 - jd `comment list`：只有第一页；--limit N 在一次请求里取 N 条
-- bilibili `comment replies`：非上游：视频楼中楼接口 x/v2/reply/reply，没有对拍；只支持视频根评论下的可见回复，专栏、动态尚不支持
+- bilibili `comment replies`：非上游：楼中楼接口 x/v2/reply/reply，没有对拍；支持视频、专栏根评论下的可见回复，动态尚不支持
 - kuaishou `comment replies`：上游的二级评论接口只核对过一组抓包参数，其余评论的结果没有经过上游核对
 - bilibili `comment add`：动态只支持纯文字和转发：图文动态（带图）的评论区挂在相簿上，上游没有查相簿 ID 的接口；稿件、专栏不受影响
 - bilibili `comment delete`：动态只支持纯文字和转发：图文动态（带图）的评论区挂在相簿上，上游没有查相簿 ID 的接口；稿件、专栏不受影响

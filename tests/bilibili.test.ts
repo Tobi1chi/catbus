@@ -267,7 +267,7 @@ async function runCommand(
 
 const ok = (data: unknown) => ({ code: 0, message: '0', data })
 
-// 非上游楼中楼接口：只用虚构评论、用户和视频 aid。
+// 非上游楼中楼接口：只用虚构评论、用户、视频 aid 和专栏 ID。
 const THREAD_ITEM = 'av100001'
 const THREAD_BVID = av2bv('100001')
 const THREAD_ROOT = '70001'
@@ -286,7 +286,7 @@ const threadPage = (pn: number, count = 21) => ({
   replies: Array.from({ length: Math.max(0, Math.min(10, count - (pn - 1) * 10)) }, (_, i) => threadReply(71001 + (pn - 1) * 10 + i)),
 })
 
-describe('bilibili comment replies：非上游视频楼中楼', () => {
+describe('bilibili comment replies：非上游楼中楼', () => {
   it('使用 aid、根评论和固定页大小，带视频 Referer 与会话 Cookie；保留直接父 ID 和 raw', async () => {
     const raw = threadReply(71002, 71001)
     const { result, requests, error } = await runCommand('commentReplies', { args: { item: `https://www.bilibili.com/video/${THREAD_BVID}/`, comment: THREAD_ROOT } }, () =>
@@ -325,9 +325,23 @@ describe('bilibili comment replies：非上游视频楼中楼', () => {
     expect(result).toEqual({ data: [], page: { cursor: null, has_more: false } })
   })
 
-  it.each(['cv100001', 'dyn:100000000000000001'])('拒绝尚未支持的评论区 %s', async (item) => {
+  it.each(['cv100001', 'https://www.bilibili.com/read/cv100001', 'https://www.bilibili.com/read/mobile?id=100001'])('专栏 %s：type=12，保留 cv item_id、直接父 ID 与分页', async (item) => {
+    const { result, requests, error } = await runCommand('commentReplies', { args: { item, comment: THREAD_ROOT }, cursor: '2' }, () =>
+      ok({ page: { num: 2, size: 10, count: 21 }, replies: [threadReply(71012, 71011)] }),
+    )
+    expect(error).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ method: 'GET', url: 'https://api.bilibili.com/x/v2/reply/reply?type=12&oid=100001&root=70001&pn=2&ps=10' })
+    expect(requests[0]!.headers).toContainEqual(['referer', 'https://www.bilibili.com/read/cv100001'])
+    expect(result.data[0]).toMatchObject({ id: '71012', item_id: 'cv100001', parent_id: '71011' })
+    expect(result.data[0][RAW]).toEqual(threadReply(71012, 71011))
+    expect(result.page).toEqual({ cursor: '3', has_more: true })
+  })
+
+  it('拒绝尚未验证的动态评论区', async () => {
+    const item = 'dyn:100000000000000001'
     const { error, urls } = await runCommand('commentReplies', { args: { item, comment: THREAD_ROOT } }, () => ok({}))
-    expect(error).toMatchObject({ code: 'UNSUPPORTED', message: expect.stringContaining('只支持视频') })
+    expect(error).toMatchObject({ code: 'UNSUPPORTED', message: expect.stringContaining('尚不支持动态') })
     expect(urls).toEqual([])
   })
 
@@ -356,7 +370,10 @@ describe('bilibili comment replies：非上游视频楼中楼', () => {
   })
 })
 
-describe('bilibili comment replies：CLI 分页与输出', () => {
+describe.each([
+  { kind: '视频', item: THREAD_ITEM, type: '1', referer: `https://www.bilibili.com/video/${THREAD_BVID}/` },
+  { kind: '专栏', item: 'cv100001', type: '12', referer: 'https://www.bilibili.com/read/cv100001' },
+])('bilibili comment replies：$kind CLI 分页与输出', ({ item, type, referer }) => {
   useTempHome()
 
   async function withThread(run: (pages: number[]) => Promise<void>) {
@@ -366,7 +383,10 @@ describe('bilibili comment replies：CLI 分页与输出', () => {
     const restore = mockSender((p) => {
       const u = new URL(p.url)
       expect(u.pathname).toBe('/x/v2/reply/reply')
+      expect(u.searchParams.get('type')).toBe(type)
+      expect(u.searchParams.get('oid')).toBe('100001')
       expect(u.searchParams.get('ps')).toBe('10')
+      expect(p.headers).toContainEqual(['referer', referer])
       const pn = Number(u.searchParams.get('pn'))
       pages.push(pn)
       return fakeResponse(ok(threadPage(pn)), { headers: [['content-type', 'application/json']], url: p.url })
@@ -379,7 +399,7 @@ describe('bilibili comment replies：CLI 分页与输出', () => {
     }
   }
 
-  const read = (...options: string[]) => cli('bilibili', 'comment', 'replies', THREAD_ITEM, THREAD_ROOT, '-a', 'default', '-q', ...options)
+  const read = (...options: string[]) => cli('bilibili', 'comment', 'replies', item, THREAD_ROOT, '-a', 'default', '-q', ...options)
 
   it('默认一页；--cursor 续页；--limit 截断后续读不遗漏、不重复', async () => {
     await withThread(async (pages) => {

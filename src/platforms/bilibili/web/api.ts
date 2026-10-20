@@ -146,17 +146,17 @@ export async function replies(b: Bili, oid: string | number, type = 1, offset = 
 }
 
 /**
- * 非上游：视频根评论的楼中楼（上游 get_replies 只读主评论）。
- * 按 Issue #22 的只读验证补充 /x/v2/reply/reply；只支持 type=1，oid 为 aid。
+ * 非上游：视频、专栏根评论的楼中楼（上游 get_replies 只读主评论）。
+ * 按只读验证补充 /x/v2/reply/reply：type=1 时 oid 为 aid，type=12 时为专栏 cv 号的数字。
  * 固定每页 10 条，--limit 截断与续读由 core 处理，避免改变页大小导致漏读。
  */
-export function replyReplies(b: Bili, bvid: string, aid: string, root: string, page = 1) {
-  const h = headers('GET').referer(`${MAIN}/video/${bvid}/`)
+export function replyReplies(b: Bili, itemId: string, oid: string, root: string, page = 1, type: 1 | 12 = 1) {
+  const h = headers('GET').referer(type === 12 ? `${MAIN}/read/${itemId}` : `${MAIN}/video/${itemId}/`)
   return b.get(`${API}/x/v2/reply/reply`, {
     headers: h.get(),
     query: [
-      ['type', 1],
-      ['oid', aid],
+      ['type', type],
+      ['oid', oid],
       ['root', root],
       ['pn', page],
       ['ps', 10],
